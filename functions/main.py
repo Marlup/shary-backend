@@ -16,7 +16,7 @@ from firebase_functions import firestore_fn, https_fn
 from firebase_admin import credentials, firestore
 import functions_framework
 
-from constants import PATH_CRED_FIREBASE_PROJECT
+from constants import PATH_CRED_FIREBASE_PROJECT, REQUIRED_FIELDS
 
 #cred = credentials.ApplicationDefault()
 cred = credentials.Certificate(PATH_CRED_FIREBASE_PROJECT)
@@ -53,7 +53,7 @@ def get_pubkey(request):
             return {"error": "Missing doc_id"}, 400
 
         doc = db.collection(COLLECTION_PUBKEYS_NAME) \
-                    .document()
+                .document()
         if not doc.exists:
             return {"error": "Public key not found"}, 404
 
@@ -69,17 +69,17 @@ def get_pubkey(request):
 def upload_pubkey(request):
     try:
         payload = request.get_json()
-        doc_id = payload.get("doc_id")
+        owner_hash = payload.get("owner_hash")
         pub_key = payload.get("pub_key")
 
-        if not doc_id:
-            return {"error": "Missing doc_id"}, 400
+        if not owner_hash:
+            return {"error": "Missing owner_hash"}, 400
 
         if not pub_key:
             return {"error": "Missing pub_key"}, 400
 
         collection = db.collection(COLLECTION_SHARING_NAME)
-        docs = collection.where("doc_id", "==", doc_id) \
+        docs = collection.where("owner_hash", "==", owner_hash) \
                          .get()
         if docs:
             return {"conflict": "Public key already exists"}, 409
@@ -100,17 +100,14 @@ def store_payload(request):
     """
     try:
         data = request.get_json()
-
-        required_fields = ["mode", "owner", "consumers", "creation_at", 
-                           "expires_at", "data", "verification_hash", "signature",
-                          ]
-        if not all(field in data for field in required_fields):
+        
+        if not all(field in data for field in REQUIRED_FIELDS):
             return {"error": "Missing required fields"}, 400
 
         payload = {
             "mode": data["mode"],
             "owner": data["owner"],
-            "consumers": data["consumers"],
+            "consumer": data["consumer"],
             "creation_at": data["creation_at"],
             "expires_at": data["expires_at"],
             "data": data["data"],
