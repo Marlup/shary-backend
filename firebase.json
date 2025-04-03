@@ -15,5 +15,11 @@
         "*.local"
       ]
     }
-  ]
+  ],
+  "emulators": {
+          "firestore": {
+            "host": "localhost",
+            "port": "5005"
+          }
+        }
 }

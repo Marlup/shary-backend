@@ -1,3 +1,8 @@
 firebase_functions~=0.1.0
 firebase_admin
+functions_framework
 google
+google-auth 
+google-auth-oauthlib
+google-auth-httplib2
+pytest

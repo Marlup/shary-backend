@@ -1,0 +1,1 @@
+PATH_CRED_FIREBASE_PROJECT = "shary-21b61-firebase-adminsdk-fbsvc-3f26b2aa68.json"
