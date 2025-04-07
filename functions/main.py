@@ -1,22 +1,19 @@
 import os
-import json
-import base64
 import hashlib
-import datetime
+from functools import wraps
 
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
-
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
-from cryptography.hazmat.primitives import serialization, hashes
 
 from flask import request, Request, abort
 import firebase_admin
 from firebase_functions import firestore_fn, https_fn
 from firebase_admin import credentials, firestore
-import functions_framework
 
-from constants import PATH_CRED_FIREBASE_PROJECT, REQUIRED_FIELDS
+# functions/create_user.py
+from jwt_manager import JWTManager
+from crypto import verify
+from constants import PATH_CRED_FIREBASE_PROJECT, REQUIRED_FIELDS, RESPONSE_SECRET_KEY
 
 #cred = credentials.ApplicationDefault()
 cred = credentials.Certificate(PATH_CRED_FIREBASE_PROJECT)
@@ -31,6 +28,7 @@ if os.getenv("FIRESTORE_EMULATOR_HOST"):
 
 COLLECTION_SHARING_NAME = "sharing"
 COLLECTION_PUBKEYS_NAME = "pubkeys"
+
 # ENV: This should match your Cloud Scheduler --oidc-service-account-email
 ALLOWED_SERVICE_ACCOUNT = os.environ.get("ALLOWED_SERVICE_ACCOUNT")
 
@@ -44,59 +42,193 @@ def hash_username(username: str) -> str:
     # Get the hex digest
     return hash_object.hexdigest()
 
+@https_fn.on_request()
+def protected_action(request: Request):
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return {"error": "Missing or invalid Authorization header"}, 401
+
+    token = auth.replace("Bearer ", "")
+    try:
+        claims = JWTManager.decode_token(token, RESPONSE_SECRET_KEY)
+        owner = claims["sub"]
+        # Now you can use `owner` to fetch data securely
+        return {"status": "Access granted", "user": owner}, 200
+    except ValueError as err:
+        return {"error": str(err)}, 401
+
+def require_jwt(func):
+    @wraps(func)
+    def wrapper(request: Request, *args, **kwargs):
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            return {"error": "Missing or invalid Authorization header"}, 401
+
+        token = auth.replace("Bearer ", "").strip()
+        print(f"require_jwt - token: {token}")
+        try:
+            print(f"require_jwt - before")
+            claims = JWTManager.decode_token(token, RESPONSE_SECRET_KEY)
+            print(f"require_jwt - {claims}")
+            owner = claims.get("sub")
+            if not owner:
+                return {"error": "Invalid token: no owner found"}, 401
+            # Inject owner into the endpoint
+            return func(request, *args, **kwargs)
+        except Exception as e:
+            return {"error": str(e)}, 401
+
+    return wrapper
+
+@https_fn.on_request()
+def login_refresh_token(request: Request):
+    try:
+        payload = request.get_json()
+        owner = payload.get("owner")
+        signature = payload.get("signature")
+
+        if not owner:
+            return {"error": "Missing owner"}, 400
+        if not signature:
+            return {"error": "Missing signature"}, 400
+
+        # Get the stored pubkey
+        docs = db.collection(COLLECTION_PUBKEYS_NAME) \
+                 .where("owner", "==", owner) \
+                 .limit(1) \
+                 .get()
+
+        if not docs:
+            return {"error": "User not found"}, 404
+
+        doc = docs[0]
+        pubkey = doc.to_dict()["pubkey"]
+
+        # Verify user identity
+        if not verify(signature, owner.encode("utf-8"), pubkey):
+            return {"error": "Verification failed"}, 403
+
+        token = JWTManager.create_token(
+            owner=owner,
+            secret_key=RESPONSE_SECRET_KEY,
+            additional_claims={"pubkey": pubkey}
+            )
+
+        return {"status": "login successful", "token": token, "user": owner}, 200
+
+    except Exception as e:
+        return {"error": str(e)}, 500
+
 #@functions_framework.http
 @https_fn.on_request()
 def get_pubkey(request):
+    owner = request.args.get("owner", None)
+    if not owner:
+        return {"error": "Missing owner"}, 400
     try:
-        doc_id = request.args.get("doc_id", None)
-        if not doc_id:
-            return {"error": "Missing doc_id"}, 400
-
-        doc = db.collection(COLLECTION_PUBKEYS_NAME) \
-                .document()
-        if not doc.exists:
+        doc = _get_doc_pubkey(owner)
+        if not doc:
             return {"error": "Public key not found"}, 404
-
-        pub_key = doc.get().to_dict()["pub_key"]
-        doc.delete()
-        return {"pub_key": pub_key}, 200
-
+        
+        pubkey = doc.to_dict()["pubkey"]
+        return {"pubkey": pubkey}, 200
+    
     except Exception as e:
         return {"error": str(e)}, 500
 
+def _get_doc_pubkey(owner, return_first=True):
+    docs = db.collection(COLLECTION_PUBKEYS_NAME) \
+            .where("owner", "==", owner) \
+            .get()
+    if not docs:
+        return None
+    return docs[0] if return_first else docs
+
+@https_fn.on_request()
+def ping(_):
+    return {"status": True}, 200
+
 #@functions_framework.http
 @https_fn.on_request()
-def upload_pubkey(request):
+def store_user(request):
     try:
         payload = request.get_json()
-        owner_hash = payload.get("owner_hash")
-        pub_key = payload.get("pub_key")
+        owner = payload.get("owner")
+        print(f"store_user - {owner}")
+        pubkey = payload.get("pubkey")
+        
+        # Validate request payload
+        if not owner:
+            return {"error": "Missing owner"}, 400
+        if not pubkey:
+            return {"error": "Missing pubkey"}, 400
 
-        if not owner_hash:
-            return {"error": "Missing owner_hash"}, 400
-
-        if not pub_key:
-            return {"error": "Missing pub_key"}, 400
-
-        collection = db.collection(COLLECTION_SHARING_NAME)
-        docs = collection.where("owner_hash", "==", owner_hash) \
+        collection = db.collection(COLLECTION_PUBKEYS_NAME)
+        docs = collection.where("owner", "==", owner) \
+                         .limit(1) \
                          .get()
         if docs:
-            return {"conflict": "Public key already exists"}, 409
+            # User already exists
+            return {"warning": "User credentials now allowed"}, 409
         
         new_doc = collection.document()
         new_doc.set(payload)
-        return {"status": "public key stored", "doc_id": new_doc.id}, 200
+
+        # Create the JWT token
+        token = JWTManager.create_token(
+            owner=owner, 
+            secret_key=RESPONSE_SECRET_KEY,
+            additional_claims={"pubkey": pubkey}
+            )
+
+        return {"status": "public key stored",
+                "doc_id": new_doc.id, 
+                "token": token
+               }, 200
 
     except Exception as e:
         return {"error": str(e)}, 500
 
 #@functions_framework.http
 @https_fn.on_request()
+@require_jwt
+def delete_user(request):
+    try:
+        payload = request.get_json()
+        owner = payload.get("owner")
+        signature = payload.get("signature")
+
+        # Validate request payload
+        if not owner:
+            return {"error": "Missing owner"}, 400
+        if not signature:
+            return {"error": "Missing signature"}, 400
+
+        doc = _get_doc_pubkey(owner)
+        if not doc:
+            return {"error": "Public key not found"}, 404
+        
+        pubkey = doc.to_dict()["pubkey"]
+
+        owner_verified = verify(signature, owner.encode("utf-8"), pubkey)
+        if owner_verified:
+            # Clean up the document
+            doc_id = doc.id
+            doc.delete()
+            return {"status": "Document deleted", "doc_id": doc_id}, 200
+        else:
+            return {"error": "Owner verification failed"}, 403
+    
+    except Exception as e:
+        return {"error": str(e)}, 500
+
+#@functions_framework.http
+@https_fn.on_request()
+@require_jwt
 def store_payload(request):
     """
     HTTP endpoint to receive encrypted data and store it in Firestore.
-    Expects a JSON payload with mode, encrypted data, etc.
+    Expects a JSON payload, encrypted data, etc.
     """
     try:
         data = request.get_json()
@@ -104,29 +236,26 @@ def store_payload(request):
         if not all(field in data for field in REQUIRED_FIELDS):
             return {"error": "Missing required fields"}, 400
 
-        payload = {
-            "mode": data["mode"],
-            "owner": data["owner"],
-            "consumer": data["consumer"],
-            "creation_at": data["creation_at"],
-            "expires_at": data["expires_at"],
-            "data": data["data"],
-            "verification_hash": data["verification_hash"],
-            "signature": data["signature"],
-        }
-
-        # Optional: validate sender token using Firebase Auth here
         collection = db.collection(COLLECTION_SHARING_NAME)
-        docs = collection.where("verification_hash", "==", data["verification_hash"]).get()
+        docs = collection.where("verification", "==", data["verification"]).get()
 
         if not docs:
+            payload = {
+                "owner": data["owner"],
+                "consumer": data["consumer"],
+                "creation_at": data["creation_at"],
+                "expires_at": data["expires_at"],
+                "data": data["data"],
+                "verification": data["verification"],
+                "signature": data["signature"]
+            }
             doc = collection.document()
             doc.set(payload)
             return {"status": "success", "doc_id": doc.id}, 200
         
         existing_doc = docs[0]
         stored_payload = existing_doc.to_dict()
-        if stored_payload.get("verification_hash") == data["verification_hash"]:
+        if stored_payload.get("verification") == data["verification"]:
             return {"status": "The data already exists"}, 409
 
     except Exception as e:
