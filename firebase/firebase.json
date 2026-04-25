@@ -1,0 +1,91 @@
+{
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "targets": [
+        {
+          "id": "ping",
+          "options": {
+            "ingressSettings": "ALLOW_ALL"
+          }
+        },
+        {
+          "id": "login_refresh_token",
+          "options": {
+            "ingressSettings": "ALLOW_ALL"
+          }
+        },
+        {
+          "id": "get_pubkey",
+          "options": {
+            "ingressSettings": "ALLOW_ALL"
+          }
+        },
+        {
+          "id": "fetch_payload",
+          "options": {
+            "ingressSettings": "ALLOW_ALL"
+          }
+        },
+        {
+          "id": "upload_payload",
+          "options": {
+            "ingressSettings": "ALLOW_ALL"
+          }
+        },
+        {
+          "id": "upload_request",
+          "options": {
+            "ingressSettings": "ALLOW_ALL"
+          }
+        },
+        {
+          "id": "fetch_request",
+          "options": {
+            "ingressSettings": "ALLOW_ALL"
+          }
+        },
+        {
+          "id": "v2",
+          "options": {
+            "ingressSettings": "ALLOW_ALL"
+          }
+        },
+        {
+          "id": "clean_expired_docs",
+          "options": {
+            "ingressSettings": "ALLOW_ALL"
+          }
+        }
+      ],
+      "ignore": [
+        "venv",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "*.local"
+      ]
+    }
+  ],
+  "emulators": {
+    "firestore": {
+      "host": "localhost",
+      "port": 8080
+    },
+    "functions": {
+      "port": 5001
+    },
+    "auth": {
+      "port": 9099
+    },
+    "ui": {
+      "enabled": true
+    },
+    "singleProjectMode": true
+  }
+}

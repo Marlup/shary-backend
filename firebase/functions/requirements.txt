@@ -1,0 +1,6 @@
+firebase-functions
+firebase-admin
+cryptography
+google-cloud-firestore
+Flask
+google-auth
