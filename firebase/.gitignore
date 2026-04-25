@@ -1,0 +1,7 @@
+__pycache__
+.pytest_cache
+shary-21b61-firebase-adminsdk-fbsvc-3f26b2aa68.json
+notes.txt
+commands*
+gcp_schedule
+docs
