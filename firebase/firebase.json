@@ -51,6 +51,18 @@
           }
         },
         {
+          "id": "request_decision",
+          "options": {
+            "ingressSettings": "ALLOW_ALL"
+          }
+        },
+        {
+          "id": "payload_decision",
+          "options": {
+            "ingressSettings": "ALLOW_ALL"
+          }
+        },
+        {
           "id": "v2",
           "options": {
             "ingressSettings": "ALLOW_ALL"
