@@ -9,15 +9,17 @@ class Req:
         self._json_body = json_body
         self.base_url = base_url
         self.content_length = None
+        self.path = "/clean_expired_docs"
 
     def get_json(self, silent=True):
         return self._json_body
 
 
 def test_clean_expired_docs_rejects_missing_scheduler_bearer(main_module):
-    response, status = main_module.clean_expired_docs(Req(method="GET", headers={}))
+    response, status, _ = main_module.clean_expired_docs(Req(method="GET", headers={}))
     assert status == 403
-    assert response["error"] == "Missing scheduler bearer token."
+    assert response["error_code"] == "missing_scheduler_bearer"
+    assert response["message"] == "Missing scheduler bearer token."
 
 
 def test_clean_expired_docs_accepts_valid_scheduler_oidc(main_module):
@@ -35,7 +37,7 @@ def test_clean_expired_docs_accepts_valid_scheduler_oidc(main_module):
     batch_mock = mock.Mock()
     main_module.db.batch.return_value = batch_mock
 
-    response, status = main_module.clean_expired_docs(
+    response, status, _ = main_module.clean_expired_docs(
         Req(
             method="GET",
             headers={"Authorization": "Bearer fake.scheduler.jwt"},
@@ -44,6 +46,6 @@ def test_clean_expired_docs_accepts_valid_scheduler_oidc(main_module):
     )
 
     assert status == 200
-    assert response["deleted"] == 3
-    assert batch_mock.delete.call_count == 3
-    assert batch_mock.commit.call_count == 3
+    assert response["deleted"] == 5
+    assert batch_mock.delete.call_count == 5
+    assert batch_mock.commit.call_count == 5
