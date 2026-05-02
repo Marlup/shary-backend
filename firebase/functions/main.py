@@ -86,7 +86,14 @@ def _initialize_firebase_admin() -> None:
 
 _initialize_firebase_admin()
 
-db = firestore.client()
+db = None
+
+
+def _db():
+    global db
+    if db is None:
+        db = firestore.client()
+    return db
 
 
 COLLECTION_IDENTITIES_V2 = "identities_v2"
@@ -325,7 +332,7 @@ def _normalize_payload_document(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _get_identity(user_hash: str) -> Optional[Dict[str, Any]]:
-    snap = db.collection(COLLECTION_IDENTITIES_V2).document(_doc_id(user_hash)).get()
+    snap = _db().collection(COLLECTION_IDENTITIES_V2).document(_doc_id(user_hash)).get()
     if not _snap_exists(snap):
         return None
     row = snap.to_dict() or {}
@@ -496,7 +503,7 @@ def _enforce_rate_limit(request: Request, endpoint_group: str, actor_key: str) -
     window_end = window_start + RATE_LIMIT_WINDOW_SECONDS
 
     key = f"{endpoint_group}:{actor_key}:{window_start}"
-    ref = db.collection(COLLECTION_RATE_LIMITS).document(_doc_id(key))
+    ref = _db().collection(COLLECTION_RATE_LIMITS).document(_doc_id(key))
     snap = ref.get()
 
     current_count = 0
@@ -585,7 +592,7 @@ def _v2_register_identity(request: Request):
         raise HttpError(401, "Invalid registration signature.", error_code="invalid_signature")
 
     now_ts = int(datetime.now(timezone.utc).timestamp())
-    ref = db.collection(COLLECTION_IDENTITIES_V2).document(_doc_id(user_hash))
+    ref = _db().collection(COLLECTION_IDENTITIES_V2).document(_doc_id(user_hash))
     snap = ref.get()
     if not _snap_exists(snap):
         ref.set(
@@ -622,7 +629,7 @@ def _v2_identity_challenge(request: Request):
     now_ts = int(datetime.now(timezone.utc).timestamp())
     expires_at = now_ts + NONCE_TTL_SECONDS
 
-    db.collection(COLLECTION_IDENTITY_NONCES_V2).document(_doc_id(nonce)).set(
+    _db().collection(COLLECTION_IDENTITY_NONCES_V2).document(_doc_id(nonce)).set(
         {
             "nonce": nonce,
             "user_hash": user_hash,
@@ -654,8 +661,8 @@ def _v2_rotate_identity(request: Request):
     canonical = ".".join(["rotate", user_hash, new_pub_kex_b64, new_pub_sign_b64, nonce, str(client_ts)])
     verification_b64 = _hash_b64(canonical)
 
-    identity_ref = db.collection(COLLECTION_IDENTITIES_V2).document(_doc_id(user_hash))
-    nonce_ref = db.collection(COLLECTION_IDENTITY_NONCES_V2).document(_doc_id(nonce))
+    identity_ref = _db().collection(COLLECTION_IDENTITIES_V2).document(_doc_id(user_hash))
+    nonce_ref = _db().collection(COLLECTION_IDENTITY_NONCES_V2).document(_doc_id(nonce))
     identity_snap = identity_ref.get()
     nonce_snap = nonce_ref.get()
 
@@ -706,7 +713,7 @@ def _v2_delete_identity(request: Request):
     signature_b64 = _require_signature_b64(_require_str(payload, "signature_b64"), "signature_b64")
 
     user_hash = _hash_b64(canonical_email)
-    ref = db.collection(COLLECTION_IDENTITIES_V2).document(_doc_id(user_hash))
+    ref = _db().collection(COLLECTION_IDENTITIES_V2).document(_doc_id(user_hash))
     snap = ref.get()
     if not _snap_exists(snap):
         raise HttpError(404, "Identity not found.", error_code="identity_not_found")
@@ -732,7 +739,7 @@ def _v2_get_pubkey(request: Request):
         raise HttpError(400, "Missing user_hash.", error_code="invalid_argument")
     user_hash = _require_hash_b64(user_hash, "user_hash")
 
-    snap = db.collection(COLLECTION_IDENTITIES_V2).document(_doc_id(user_hash)).get()
+    snap = _db().collection(COLLECTION_IDENTITIES_V2).document(_doc_id(user_hash)).get()
     if not _snap_exists(snap):
         raise HttpError(404, "Identity not found.", error_code="identity_not_found")
 
@@ -823,7 +830,7 @@ def get_pubkey(request: Request):
             raise HttpError(400, "Missing user", error_code="invalid_argument")
         user_hash = _require_hash_b64(user_hash, "user")
 
-        snap = db.collection(COLLECTION_IDENTITIES_V2).document(_doc_id(user_hash)).get()
+        snap = _db().collection(COLLECTION_IDENTITIES_V2).document(_doc_id(user_hash)).get()
         if not _snap_exists(snap):
             raise HttpError(404, "Public key not found!", error_code="identity_not_found")
 
@@ -900,7 +907,7 @@ def _store_payload_like(collection_name: str, request: Request, duplicate_messag
     _enforce_rate_limit(request, "upload", _rate_limit_actor_key(user_hash, request))
     _verify_payload_integrity(payload, str(sender_identity.get("pub_sign_b64", "")))
 
-    collection = db.collection(collection_name)
+    collection = _db().collection(collection_name)
     now_ts = int(datetime.now(timezone.utc).timestamp())
     docs = (
         collection.where(filter=FieldFilter("verification", "==", payload["verification"]))
@@ -979,7 +986,7 @@ def _fetch_by_recipient(collection_name: str, request: Request):
     current_ts = int(datetime.now(timezone.utc).timestamp())
     fetch_limit = _safe_positive_limit(request)
     docs = (
-        db.collection(collection_name)
+        _db().collection(collection_name)
         .where(filter=FieldFilter("recipient", "==", user_hash))
         .where(filter=FieldFilter("expires_at", ">=", current_ts))
         .order_by("expires_at", direction=firestore.Query.DESCENDING)
@@ -1031,7 +1038,7 @@ def fetch_request(request: Request):
 def _find_active_request(request_id_value: str) -> Tuple[str, Dict[str, Any]]:
     now_ts = int(datetime.now(timezone.utc).timestamp())
     docs = (
-        db.collection(COLLECTION_REQUESTS)
+        _db().collection(COLLECTION_REQUESTS)
         .where(filter=FieldFilter("verification", "==", request_id_value))
         .where(filter=FieldFilter("expires_at", ">=", now_ts))
         .order_by("expires_at", direction=firestore.Query.DESCENDING)
@@ -1085,7 +1092,7 @@ def _handle_request_decision(request: Request, compatibility_route: bool):
         raise HttpError(403, "Recipient does not own this request.", error_code="recipient_scope_violation")
 
     decision_doc_id = _hash_b64(f"{request_id_value}:{recipient_hash}")
-    decision_ref = db.collection(COLLECTION_REQUEST_DECISIONS).document(_doc_id(decision_doc_id))
+    decision_ref = _db().collection(COLLECTION_REQUEST_DECISIONS).document(_doc_id(decision_doc_id))
     decision_snap = decision_ref.get()
 
     if _snap_exists(decision_snap):
@@ -1204,8 +1211,8 @@ def clean_expired_docs(request: Request):
             COLLECTION_REQUEST_DECISIONS,
             COLLECTION_RATE_LIMITS,
         ]:
-            expired_query = db.collection(collection_name).where(filter=FieldFilter("expires_at", "<=", now_ts))
-            batch = db.batch()
+            expired_query = _db().collection(collection_name).where(filter=FieldFilter("expires_at", "<=", now_ts))
+            batch = _db().batch()
             count = 0
             for doc in expired_query.stream():
                 batch.delete(doc.reference)
@@ -1213,7 +1220,7 @@ def clean_expired_docs(request: Request):
                 total_deleted += 1
                 if count % MAX_BATCH_SIZE == 0:
                     batch.commit()
-                    batch = db.batch()
+                    batch = _db().batch()
             if count % MAX_BATCH_SIZE != 0:
                 batch.commit()
 
