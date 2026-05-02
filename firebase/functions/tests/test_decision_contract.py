@@ -113,11 +113,20 @@ def test_payload_decision_compat_headers(main_module):
         {"recipient": recipient_hash, "expires_at": now_ts + 600},
     )
 
-    snap = mock.Mock()
-    snap.exists = False
-
     decision_ref = mock.Mock()
-    decision_ref.get.return_value = snap
+    state = {}
+
+    def _fake_get():
+        snap = mock.Mock()
+        if state:
+            snap.exists = True
+            snap.to_dict.return_value = dict(state)
+        else:
+            snap.exists = False
+        return snap
+
+    decision_ref.get.side_effect = _fake_get
+    decision_ref.set.side_effect = lambda payload: state.update(payload)
 
     collection_mock = mock.Mock()
     collection_mock.document.return_value = decision_ref
@@ -125,9 +134,15 @@ def test_payload_decision_compat_headers(main_module):
 
     req = Req(method="POST", headers={"Authorization": "Bearer t"}, json_body=_decision_body(recipient_hash, request_id))
     req.path = "/payload_decision"
-    body, status, headers = main_module.payload_decision(req)
+    first_body, first_status, first_headers = main_module.payload_decision(req)
+    second_body, second_status, second_headers = main_module.payload_decision(req)
 
-    assert status == 200
-    assert body["status"] == "processed"
-    assert headers["X-Compatibility-Endpoint"] == "payload_decision"
-    assert headers["X-Deprecation-Date"] == "2026-07-31"
+    assert first_status == 200
+    assert first_body["status"] == "processed"
+    assert first_headers["X-Compatibility-Endpoint"] == "payload_decision"
+    assert first_headers["X-Deprecation-Date"] == "2026-07-31"
+
+    assert second_status == 200
+    assert second_body["status"] == "already_processed"
+    assert second_headers["X-Compatibility-Endpoint"] == "payload_decision"
+    assert second_headers["X-Deprecation-Date"] == "2026-07-31"

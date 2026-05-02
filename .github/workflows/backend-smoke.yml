@@ -1,0 +1,147 @@
+name: backend-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Staging backend base URL (for example https://<region>-<project>.cloudfunctions.net)"
+        required: true
+        type: string
+
+jobs:
+  smoke-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BASE_URL: ${{ inputs.base_url }}
+      AUTH_BEARER: ${{ secrets.SMOKE_AUTH_BEARER }}
+      RECIPIENT_HASH: ${{ secrets.SMOKE_RECIPIENT_HASH }}
+      REQUEST_HASH: ${{ secrets.SMOKE_REQUEST_HASH }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run deployed contract smoke checks
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+          import uuid
+
+          base_url = (os.getenv("BASE_URL") or "").rstrip("/")
+          token = os.getenv("AUTH_BEARER") or ""
+          recipient = os.getenv("RECIPIENT_HASH") or ""
+          request_hash = os.getenv("REQUEST_HASH") or ""
+
+          missing = [name for name, value in {
+              "BASE_URL": base_url,
+              "AUTH_BEARER": token,
+              "RECIPIENT_HASH": recipient,
+              "REQUEST_HASH": request_hash,
+          }.items() if not value]
+          if missing:
+              raise SystemExit(f"Missing required smoke configuration: {', '.join(missing)}")
+
+          def call_json(method, path, payload=None, request_id=None):
+              rid = request_id or f"smoke-{uuid.uuid4().hex[:16]}"
+              headers = {
+                  "Accept": "application/json",
+                  "X-Request-Id": rid,
+              }
+              if token:
+                  headers["Authorization"] = f"Bearer {token}"
+              data = None
+              if payload is not None:
+                  data = json.dumps(payload).encode("utf-8")
+                  headers["Content-Type"] = "application/json"
+              req = urllib.request.Request(
+                  f"{base_url}/{path.lstrip('/')}",
+                  data=data,
+                  headers=headers,
+                  method=method,
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      status = resp.getcode()
+                      raw = resp.read().decode("utf-8")
+                      body = json.loads(raw) if raw else {}
+                      resp_headers = {k: v for k, v in resp.headers.items()}
+              except urllib.error.HTTPError as exc:
+                  status = exc.code
+                  raw = exc.read().decode("utf-8")
+                  body = json.loads(raw) if raw else {}
+                  resp_headers = {k: v for k, v in exc.headers.items()}
+              return status, body, resp_headers, rid
+
+          def assert_keys(obj, keys, context):
+              missing_keys = [k for k in keys if k not in obj]
+              if missing_keys:
+                  raise AssertionError(f"{context} missing keys: {missing_keys} body={obj}")
+
+          # 1) Ping baseline.
+          status, body, headers, request_id = call_json("GET", "ping")
+          if status != 200:
+              raise AssertionError(f"/ping expected 200, got {status} body={body}")
+          if "X-Request-Id" not in headers:
+              raise AssertionError("/ping response missing X-Request-Id header")
+          if body.get("request_id") != headers["X-Request-Id"]:
+              raise AssertionError("/ping request_id mismatch between body and header")
+
+          decision_payload = {
+              "recipient": recipient,
+              "request_id": request_hash,
+              "decision": "accept",
+              "schema_version": 1,
+          }
+
+          # 2) Canonical decision endpoint should return ACK semantics.
+          status, body, headers, request_id = call_json("POST", "request_decision", decision_payload)
+          if status != 200:
+              raise AssertionError(f"/request_decision expected 200 ACK, got {status} body={body}")
+          assert_keys(body, ["status", "reason_code", "decision_id", "request_id", "schema_version"], "/request_decision ACK")
+
+          # 3) Compatibility endpoint should return same ACK + deprecation headers.
+          status, body, headers, request_id = call_json("POST", "payload_decision", decision_payload)
+          if status != 200:
+              raise AssertionError(f"/payload_decision expected 200 ACK, got {status} body={body}")
+          assert_keys(body, ["status", "reason_code", "decision_id", "request_id", "schema_version"], "/payload_decision ACK")
+          if headers.get("X-Compatibility-Endpoint") != "payload_decision":
+              raise AssertionError(f"compat header mismatch: {headers.get('X-Compatibility-Endpoint')}")
+          if "X-Deprecation-Date" not in headers:
+              raise AssertionError("compat response missing X-Deprecation-Date header")
+
+          # 4) Unsupported schema contract.
+          bad_schema = dict(decision_payload)
+          bad_schema["schema_version"] = 999
+          status, body, headers, request_id = call_json("POST", "request_decision", bad_schema)
+          if status != 400:
+              raise AssertionError(f"unsupported schema expected 400, got {status} body={body}")
+          if body.get("error_code") != "unsupported_schema_version":
+              raise AssertionError(f"unexpected error_code for unsupported schema: {body}")
+          assert_keys(body, ["error_code", "message", "request_id"], "unsupported schema error")
+
+          # 5) Rate-limit contract probe.
+          # Loop up to 80 calls to get a deterministic 429 contract sample.
+          rate_limit_seen = False
+          for _ in range(80):
+              status, body, headers, request_id = call_json("POST", "request_decision", decision_payload)
+              if status == 429:
+                  rate_limit_seen = True
+                  if body.get("error_code") != "rate_limited":
+                      raise AssertionError(f"429 without rate_limited code: {body}")
+                  if "retry_after_seconds" not in body:
+                      raise AssertionError(f"429 missing retry_after_seconds: {body}")
+                  break
+          if not rate_limit_seen:
+              raise AssertionError("Did not observe 429 rate_limited contract in probe window")
+
+          print("Smoke contract checks passed.")
+          PY

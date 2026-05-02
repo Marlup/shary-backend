@@ -54,6 +54,15 @@ def test_request_id_passthrough(main_module):
     assert headers["X-Request-Id"] == "req-abc-123"
 
 
+def test_request_id_generated_when_missing(main_module):
+    req = Req(method="GET", headers={})
+    response, status, headers = main_module.ping(req)
+    assert status == 200
+    assert "X-Request-Id" in headers
+    assert headers["X-Request-Id"] == response["request_id"]
+    assert len(headers["X-Request-Id"]) >= 8
+
+
 def test_upload_payload_rejects_ttl_above_limit(main_module):
     now_ts = int(datetime.now(timezone.utc).timestamp())
     body = _payload(now_ts, ttl=main_module.MAX_DOCUMENT_TTL_SECONDS + 1)
@@ -105,6 +114,44 @@ def test_upload_payload_rate_limit_contract(main_module):
     assert response["retry_after_seconds"] == 19
 
 
+def test_upload_request_rejects_unsupported_schema(main_module):
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    body = _payload(now_ts, ttl=60)
+    body["schema_version"] = 2
+
+    response, status, _ = main_module.upload_request(
+        Req(method="POST", headers={"Authorization": "Bearer t"}, json_body=body)
+    )
+
+    assert status == 400
+    assert response["error_code"] == "unsupported_schema_version"
+
+
+def test_upload_request_rate_limit_contract(main_module):
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    body = _payload(now_ts, ttl=60)
+
+    main_module._validate_sender_binding = lambda request, payload: payload["user"]
+    main_module._get_identity = lambda user_hash: {"pub_sign_b64": base64.b64encode(b"k" * 32).decode("utf-8")}
+    main_module._verify_payload_integrity = lambda payload, sender_pub_sign_b64: None
+    main_module._enforce_rate_limit = lambda request, endpoint_group, actor_key: (_ for _ in ()).throw(
+        main_module.HttpError(
+            429,
+            "Rate limit exceeded. Retry after 23 seconds.",
+            error_code="rate_limited",
+            details={"retry_after_seconds": 23},
+        )
+    )
+
+    response, status, _ = main_module.upload_request(
+        Req(method="POST", headers={"Authorization": "Bearer t"}, json_body=body)
+    )
+
+    assert status == 429
+    assert response["error_code"] == "rate_limited"
+    assert response["retry_after_seconds"] == 23
+
+
 def test_fetch_payload_caps_limit_and_queries_only_unexpired(main_module):
     user_hash = _hash_b64("recipient")
 
@@ -140,6 +187,67 @@ def test_fetch_payload_caps_limit_and_queries_only_unexpired(main_module):
         .order_by.return_value
     )
     limited_query.limit.assert_called_once_with(main_module.MAX_FETCH_LIMIT)
+
+
+def test_fetch_request_rejects_unsupported_schema_query(main_module):
+    user_hash = _hash_b64("recipient")
+    response, status, _ = main_module.fetch_request(
+        Req(
+            method="GET",
+            headers={"Authorization": "Bearer t"},
+            args={"user": user_hash, "schema_version": "2"},
+        )
+    )
+    assert status == 400
+    assert response["error_code"] == "unsupported_schema_version"
+
+
+def test_fetch_request_recipient_identity_missing(main_module):
+    user_hash = _hash_b64("recipient")
+    main_module._require_hash_owner = lambda request, requested_hash: "owner@example.com"
+    main_module._identity_exists = lambda user: False
+    response, status, _ = main_module.fetch_request(
+        Req(
+            method="GET",
+            headers={"Authorization": "Bearer t"},
+            args={"user": user_hash},
+        )
+    )
+    assert status == 403
+    assert response["error_code"] == "recipient_identity_missing"
+
+
+def test_deprecated_endpoints_return_contract_envelope(main_module):
+    req = Req(method="POST", headers={"Authorization": "Bearer t"})
+    for endpoint in (main_module.upload_user, main_module.delete_user):
+        response, status, headers = endpoint(req)
+        assert status == 410
+        assert response["error_code"] == "deprecated_endpoint"
+        assert "message" in response
+        assert "request_id" in response
+        assert response["request_id"] == headers["X-Request-Id"]
+
+
+def test_error_envelope_required_keys(main_module):
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    bad_schema_body = _payload(now_ts, ttl=60)
+    bad_schema_body["schema_version"] = 2
+
+    scenarios = [
+        lambda: main_module.ping(Req(method="POST")),
+        lambda: main_module.upload_payload(
+            Req(method="POST", headers={"Authorization": "Bearer t"}, json_body=bad_schema_body)
+        ),
+        lambda: main_module.upload_user(Req(method="POST", headers={"Authorization": "Bearer t"})),
+    ]
+
+    for run_case in scenarios:
+        response, status, headers = run_case()
+        assert status >= 400
+        assert "error_code" in response
+        assert "message" in response
+        assert "request_id" in response
+        assert response["request_id"] == headers["X-Request-Id"]
 
 
 def test_v2_register_does_not_echo_bearer_token(main_module):
